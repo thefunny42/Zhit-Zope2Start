@@ -1,0 +1,4 @@
+Changes
+=======
+
+- Initial version inspired from plone.recipe.zope2instance.
