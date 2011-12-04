@@ -34,344 +34,46 @@ from pkg_resources import iter_entry_points
 
 from Zope2.Startup import zopectl
 
-if zopectl.WIN:
-    import traceback
-    from pkg_resources import resource_filename
-    import pywintypes
-    import win32api
-    from win32com.shell import shell
-    import win32con
-    import win32service
-    import win32serviceutil
-
-    ERR_MSG_NOT_ADMIN = (
-        'ERROR: You are not member of the "Administrators" group, '
-        'or you have not run the shell as Administrator.')
-
 
 class AdjustedZopeCmd(zopectl.ZopeCmd):
 
-    if zopectl.WIN:
+    def do_start(self, arg):
+        self.get_status()
+        if not self.zd_up:
+            args = [
+                self.options.python,
+                self.options.zdrun,
+                ]
+            args += self._get_override("-S", "schemafile")
+            args += self._get_override("-C", "configfile")
+            args += self._get_override("-b", "backofflimit")
+            args += self._get_override("-d", "daemon", flag=1)
+            args += self._get_override("-f", "forever", flag=1)
+            args += self._get_override("-s", "sockname")
+            args += self._get_override("-u", "user")
+            if self.options.umask:
+                args += self._get_override("-m", "umask",
+                                           oct(self.options.umask))
+            args += self._get_override("-x", "exitcodes",
+                ",".join(map(str, self.options.exitcodes)))
+            args += self._get_override("-z", "directory")
 
-        # printable representations of the Windows service states
-        service_state_map = {
-            win32service.SERVICE_START_PENDING: 'starting',
-            win32service.SERVICE_RUNNING:       'started',
-            win32service.SERVICE_STOP_PENDING:  'stopping',
-            win32service.SERVICE_STOPPED:       'stopped',
-        }
+            args.extend(self.options.program)
 
-        def is_user_admin(self):
-            # http://msdn.microsoft.com/en-us/library/bb776463%28VS.85%29.aspx:
-            # " This function is available through Windows Vista. It might be
-            #   altered or unavailable in subsequent versions of Windows."
-            # It's still available in Windows 7, but we should consider using
-            # CheckTokenMembership() instead in a later Plone version.
-            return shell.IsUserAnAdmin()
-
-        def _get_pid_from_pidfile(self):
-            fname = self.options.configroot.pid_filename
-            if os.path.exists(fname):
-                with open(fname) as f:
-                    try:
-                        return int(f.read().strip())
-                    except ValueError:
-                        # pid file for any reason empty or corrupt
-                        print 'ERROR: Corrupt pid file: %s' % fname
-                        return 0
+            if self.options.daemon:
+                flag = os.P_NOWAIT
             else:
-                return 0
-
-        def _get_service_name(self):
-            return 'Zope%s' % str(hash(self.options.directory.lower()))
-
-        def _get_service_status(self):
-            """ Return status of Windows service, or None if not installed.
-
-            Possible status values are:
-
-            win32service.SERVICE_START_PENDING
-            win32service.SERVICE_RUNNING
-            win32service.SERVICE_STOP_PENDING
-            win32service.SERVICE_STOPPED
-
-            """
-            name = self._get_service_name()
-            try:
-                status = win32serviceutil.QueryServiceStatus(name)[1]
-            except pywintypes.error, err:
-                # (1060, 'GetServiceKeyName', 'The specified service does not exist as an installed service.')
-                if err[0] == 1060:
-                    return None
-                else:
-                    # be lazy: don't bother to take care of unexpected errors
-                    traceback.print_exc()
-            return status
-
-        def _get_service_class_string(self):
-            return '%s.Service' % resource_filename(
-                'nt_svcutils', 'service')
-
-        def _set_winreg_key(self, name, value, keyname='PythonClass'):
-            # see "collective.buildout.cluster.ClusterBase"
-            # TODO: use Python module "_winreg"
-
-            def open_key(keyname=None):
-                keypath = ('System\\CurrentControlSet\\Services\\' +
-                           self._get_service_name())
-                if keyname:
-                    keypath += ('\\' + keyname)
-                return win32api.RegOpenKey(
-                    win32con.HKEY_LOCAL_MACHINE,
-                    keypath,
-                    0,
-                    win32con.KEY_ALL_ACCESS)
-
-            key = open_key(keyname)
-            try:
-                win32api.RegSetValueEx(key,
-                                       name,
-                                       0,
-                                       win32con.REG_SZ,
-                                       value)
-            finally:
-                win32api.RegCloseKey(key)
-
-        def do_install(self, arg):
-            # see "collective.buildout.cluster.base.ClusterBase.install()"
-
-            if not shell.IsUserAnAdmin():
-                print(ERR_MSG_NOT_ADMIN)
-                return
-
-            status = self._get_service_status()
-            if status is not None:
-                print 'ERROR: Zope is already installed as a Windows service.'
-                return
-
-            # TODO: Are return values from do_ methods are really taken care of?
-            # http://docs.python.org/library/cmd.html: "The return value is a
-            # flag indicating whether interpretation of commands
-            # by the interpreter should stop."
-
-            ret_code = 0
-
-            class_string = self._get_service_class_string()
-            name = self._get_service_name()
-            display_name = 'Zope instance at '+ self.options.directory
-
-            if arg.lower() == 'auto':
-                start_type = win32service.SERVICE_AUTO_START
-            else:
-                start_type = win32service.SERVICE_DEMAND_START
-
-            try:
-                win32serviceutil.InstallService(class_string,
-                                                name,
-                                                display_name,
-                                                start_type)
-
-                # put info in registry for the Windows Service class to use:
-
-                instance_script = self.options.progname
-                # for example
-                #     'D:\\local\\Plone-4.0b5\\bin\\instance-script.py'
-                # but the Windows Service must launch
-                #     'D:\\local\\Plone-4.0b5\\bin\\instance.exe'
-                script_suffix = '-script.py'
-                pos = instance_script.rfind(script_suffix)
-                instance_exe = instance_script[:pos] + '.exe'
-
-                self._set_winreg_key('command',
-                             '"%s" console' % instance_exe)
-                self._set_winreg_key('pid_filename',
-                             self.options.configroot.pid_filename)
-
-                print 'Installed Zope as Windows Service "%s".' % name
-
-            except pywintypes.error:
-                traceback.print_exc()
-                ret_code = 1
-
-            return ret_code
-
-        def help_install(self):
-            print 'install -- Install Zope as a Windows service that must be manually started.'
-            print 'install auto -- Install Zope as a Windows service that starts at system startup.'
-
-        def do_start(self, arg):
-
-            if not shell.IsUserAnAdmin():
-                print(ERR_MSG_NOT_ADMIN)
-                return
-
-            status = self._get_service_status()
-            if status is None:
-                print 'ERROR: Zope is not installed as Windows service.'
-                return
-            elif status == win32service.SERVICE_START_PENDING:
-                print 'ERROR: The Zope Windows service is about to start.'
-                return
-            elif status == win32service.SERVICE_RUNNING:
-                print 'ERROR: The Zope Windows service is already running.'
-                return
-            name = self._get_service_name()
-            try:
-                win32serviceutil.StartService(name)
-                print 'Starting Windows Service "%s".' % name
-            except pywintypes.error:
-                traceback.print_exc()
-
-        def do_restart(self, arg):
-
-            if not shell.IsUserAnAdmin():
-                print(ERR_MSG_NOT_ADMIN)
-                return
-
-            status = self._get_service_status()
-            if status is None:
-                print 'ERROR: Zope is not installed as Windows service.'
-                return
-            elif status == win32service.SERVICE_STOPPED:
-                print 'ERROR: The Zope Windows service has not been started.'
-                return
-            name = self._get_service_name()
-            try:
-                win32serviceutil.RestartService(name)
-                print 'Restarting Windows Service "%s".' % name
-            except pywintypes.error:
-                traceback.print_exc()
-
-        def do_stop(self, arg):
-
-            if not shell.IsUserAnAdmin():
-                print(ERR_MSG_NOT_ADMIN)
-                return
-
-            status = self._get_service_status()
-            if status is None:
-                print 'ERROR: Zope is not installed as Windows service.'
-                return
-            elif status == win32service.SERVICE_STOPPED:
-                print 'ERROR: The Zope Windows service has not been started.'
-                return
-            name = self._get_service_name()
-            try:
-                win32serviceutil.StopService(name)
-                print 'Stopping Windows Service "%s".' % name
-            except pywintypes.error:
-                traceback.print_exc()
-
-        def do_remove(self, arg):
-
-            if not shell.IsUserAnAdmin():
-                print(ERR_MSG_NOT_ADMIN)
-                return
-
-            status = self._get_service_status()
-            if status is None:
-                print 'ERROR: Zope is not installed as a Windows service.'
-                return
-            elif not status is win32service.SERVICE_STOPPED:
-                print 'ERROR: Please stop the Windows service before removing it.'
-                return
-
-            ret_code = 0
-            name = self._get_service_name()
-            try:
-                win32serviceutil.RemoveService(name)
-                print 'Removed Windows Service "%s".' % name
-            except pywintypes.error:
-                ret_code = 1
-                traceback.print_exc()
-
-            return ret_code
-
-        # NOTE: do not rename! called also on windows by non-windows "do_" methods
-        def get_status(self):
-            """This method only has side effects, despite its name:
-
-            - Set "self.zd_pid" to the PID (0 if no PID found), based on
-            the content of the PID file, e.g. "var/instance.pid".
-            This value is checked by the startup machinery of Zope.
-
-            - Set "self.zd_up" to 1 or 0 (unclear what this is used for)
-
-            """
-            zopectl.ZopeCmd.get_status(self)
-            # override value set by zopectl.ZopeCmd.get_status() (always -1 or 0)
-            self.zd_pid = self._get_pid_from_pidfile()
-
-            if self.zd_pid > 0:
-                self.zd_up = 1
-            else:
-                self.zd_up = 0
-
-        def do_status(self, arg=''):
-            if arg not in ('', '-l'):
-                print 'ERROR: The only valid option is "-l".'
-                return
-            service_status = self._get_service_status()
-            if service_status is None:
-                print 'Zope is not installed as a Windows service.'
-            else:
-                name = self._get_service_name()
-                state = self.service_state_map.get(
-                    service_status, 'in an unknown state')
-                print('Zope is installed as Windows service "%s", '
-                      'this service is currently %s.' % (name, state))
-            if arg == '-l' and self.zd_status:
-                print self.zd_status
-
-            # TODO: what about "self.zd_up"?
-
-        def help_status(self):
-            print 'status -- Print status of the Windows service.'
-            print 'status -l -- Print status of the Windows service, and raw status output.'
-
-        def help_EOF(self):
-            print 'To quit, type CTRL+Z or use the quit command.'
-
-    # end of "if zopectl.WIN"
-    else:
-
-        def do_start(self, arg):
-            self.get_status()
-            if not self.zd_up:
-                args = [
-                    self.options.python,
-                    self.options.zdrun,
-                    ]
-                args += self._get_override("-S", "schemafile")
-                args += self._get_override("-C", "configfile")
-                args += self._get_override("-b", "backofflimit")
-                args += self._get_override("-d", "daemon", flag=1)
-                args += self._get_override("-f", "forever", flag=1)
-                args += self._get_override("-s", "sockname")
-                args += self._get_override("-u", "user")
-                if self.options.umask:
-                    args += self._get_override("-m", "umask",
-                                               oct(self.options.umask))
-                args += self._get_override("-x", "exitcodes",
-                    ",".join(map(str, self.options.exitcodes)))
-                args += self._get_override("-z", "directory")
-
-                args.extend(self.options.program)
-
-                if self.options.daemon:
-                    flag = os.P_NOWAIT
-                else:
-                    flag = os.P_WAIT
-                env = self.environment().copy()
-                env.update({'ZMANAGED': '1', })
-                os.spawnvpe(flag, args[0], args, env)
-            elif not self.zd_pid:
-                self.send_action("start")
-            else:
-                print "daemon process already running; pid=%d" % self.zd_pid
-                return
-            self.awhile(lambda: self.zd_pid,
-                        "daemon process started, pid=%(zd_pid)d")
+                flag = os.P_WAIT
+            env = self.environment().copy()
+            env.update({'ZMANAGED': '1', })
+            os.spawnvpe(flag, args[0], args, env)
+        elif not self.zd_pid:
+            self.send_action("start")
+        else:
+            print "daemon process already running; pid=%d" % self.zd_pid
+            return
+        self.awhile(lambda: self.zd_pid,
+                    "daemon process started, pid=%(zd_pid)d")
 
     def environment(self):
         configroot = self.options.configroot
@@ -395,12 +97,7 @@ class AdjustedZopeCmd(zopectl.ZopeCmd):
                    'configure(r\'%s\'); ' %
                    (python, pyflags, self.options.configfile))
         cmdline = cmdline + more + '\"'
-        if zopectl.WIN:
-            # entire command line must be quoted
-            # as well as the components
-            return '"%s"' % cmdline
-        else:
-            return cmdline
+        return cmdline
 
     def do_run(self, arg):
         # If the command line was something like
@@ -475,22 +172,15 @@ class AdjustedZopeCmd(zopectl.ZopeCmd):
                 local_additions += ['debug-mode=on']
             program.extend(local_additions)
 
-        if zopectl.WIN:
-            # The outer quotes were causing
-            # "WindowsError: [Error 87] The parameter is incorrect"
-            # command = zopectl.quote_command(program)
-            command = ' '.join(['"%s"' % x for x in program])
-        else:
-            command = program
+        command = program
 
-        if debug or zopectl.WIN:
+        if debug:
             try:
                 self._exitstatus = subprocess.call(command, env=env)
             except KeyboardInterrupt:
                 return
-            finally:
-                for addition in local_additions:
-                    program.remove(addition)
+            for addition in local_additions:
+                program.remove(addition)
         else:
             # non-debug mode on Unix: replace the current process
             # (required by e.g. supervisord)
